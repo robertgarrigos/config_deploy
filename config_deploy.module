@@ -1,0 +1,627 @@
+<?php
+
+/**
+ * @file
+ * A short description of this module.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function config_deploy_menu() {
+  $items['admin/config/development/configuration/deploy'] = array(
+    'title' => 'Deploy',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('config_deploy_form'),
+    'access arguments' => array('synchronize configuration'),
+    // 'file' => 'config.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 10,
+  );
+  $items['admin/config/development/configuration/deploy/view'] = array(
+    'title' => 'Manage',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('config_deploy_form'),
+    'access arguments' => array('synchronize configuration'),
+    // 'file' => 'config.admin.inc',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => 1,
+  );
+  $items['admin/config/development/configuration/deploy/export'] = array(
+    'page callback' => 'config_deploy_diff_export',
+    'access arguments' => array('synchronize configuration'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/config/development/configuration/deploy/delete'] = array(
+    'title' => t('delete'),
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('config_deploy_snapshot_delete_confirm'),
+    'access arguments' => array('synchronize configuration'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 2,
+  );
+  $items['admin/config/development/configuration/deploy/diff/%'] = array(
+    'title' => 'Configuration diff',
+    'page callback' => 'config_deploy_diff_page',
+    'page arguments' => array(6),
+    'access arguments' => array('synchronize configuration'),
+    // 'type' => MENU_LOCAL_TASK,
+  );
+  return $items;
+}
+
+function config_deploy_form_config_sync_form_alter(&$form, &$form_state, $form_id) {
+  $form_state['config_statuses'] = config_get_statuses();
+  $changed_config_count = count(array_filter($form_state['config_statuses']));
+  if ($changed_config_count != 0) {
+    $form['delete_missing_fieldset'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Override default functionallity'),
+    );
+    $form['delete_missing_fieldset']['delete_missing'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Delete missing config files'),
+      '#description' => t('Select this checkbox if missing config files should be deleted (core\'s default). Unchecking this will apply only new or changed configurations but it will ignore any removed configurations.'),
+      '#default_value' => 0,
+    );
+    $form['actions']['submit']['#submit'] = array('config_deploy_sync_submit');
+  }
+}
+
+/**
+ * Submit handler for the altered config_sync_form()
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return void
+ */
+function config_deploy_sync_submit(array &$form, array &$form_state) {
+  // Delete only missing configk files if checkbox is set
+  if (!$form_state['values']['delete_missing']) {
+    $form_state['config_statuses'] = array_filter($form_state['config_statuses'], function ($value) {
+      return $value !== 'delete';
+    });
+  }
+  $last_sync_time = state_get('config_sync');
+  if ($last_sync_time == NULL || $last_sync_time < REQUEST_TIME - 120) {
+    module_load_include('inc', 'config', 'config.sync');
+    $config_sync_batch = config_sync_batch($form_state['config_statuses']);
+    batch_set($config_sync_batch);
+  } else {
+    backdrop_set_message(t('Another request may be synchronizing configuration already or a sync failed unexpectedly. Please wait a minute and try again.'), 'error');
+  }
+
+  return $form;
+}
+
+/**
+ * Form callback; Build the form for managing snapshots.
+ */
+function config_deploy_form(array $form, array &$form_state) {
+
+  // Add the AJAX library to the form for dialog support.
+  $form['#attached']['library'][] = array('system', 'backdrop.ajax');
+  $form['#attached']['css'][] = backdrop_get_path('module', 'config') . '/css/config.admin.css';
+
+  $form['description'] = array(
+    '#type' => 'help',
+    '#markup' => t('Manage your config snapshot.'),
+  );
+  $latest_snapshot = config_deploy_get_latest_snapshot();
+  if ($latest_snapshot) {
+    $form['latest_snapshot'] = array(
+      '#type' => 'help',
+      '#markup' => t('There is a snapshot created:') . ' ' . $latest_snapshot,
+    );
+    $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
+    $differences = config_deploy_compare_directories($snapshot_directory);
+
+    if (empty($differences['added']) && empty($differences['removed']) && empty($differences['changed'])) {
+      $diff = FALSE;
+      $form['no_changes'] = array(
+        '#theme' => 'table',
+        '#header' => array('Name', 'Operations'),
+        '#rows' => array(),
+        '#empty' => t('There are no differences between the active configuration and the snapshot.',),
+      );
+    } else {
+      $diff = TRUE;
+
+      foreach ($differences as $config_change_type => $config_file) {
+        foreach ($config_file as $file) {
+          $links['view_diff'] = array(
+            '#type' => 'link',
+            '#title' => t('View differences'),
+            '#href' => 'admin/config/development/configuration/deploy/diff/' . $file,
+            '#attributes' => array(
+              'class' => array('use-ajax'),
+              'data-dialog' => 'true',
+              'data-dialog-options' => '{"dialogClass": "config-diff"}',
+            ),
+          );
+          $row = array(
+            'name' => $file,
+          );
+          $row['operations'] = array(
+            'data' => $links,
+          );
+          $form[$config_change_type]['list']['#rows'][] = $row;
+        }
+
+      }
+
+      foreach ($differences as $config_change_type => $diff_array) {
+        if (empty($diff_array)) {
+          continue;
+        }
+
+        switch ($config_change_type) {
+          case 'added':
+            $heading = format_plural(count($form[$config_change_type]['list']['#rows']), '@count new configuration', '@count new configuration');
+            break;
+
+          case 'changed':
+            $heading = format_plural(count($form[$config_change_type]['list']['#rows']), '@count configuration changed', '@count configurations changed');
+            break;
+
+          case 'removed':
+            $heading = format_plural(count($form[$config_change_type]['list']['#rows']), '@count configuration removed', '@count configurations removed');
+            break;
+        }
+
+        $form[$config_change_type]['heading'] = array(
+          '#markup' => '<h3>' . $heading . '</h3>',
+          '#weight' => -1,
+        );
+        $header = ($config_change_type === 'removed') ? array(t('Name'), t('Operations')) : array(t('Name'), t('Operations'));
+        $form[$config_change_type]['list'] += array(
+          '#theme' => 'table',
+          '#header' => $header,
+        );
+      }
+    }
+  } else {
+    $form['description'] = array(
+      '#type' => 'help',
+      '#markup' => t('Create a snapshot of your config files to be able to compare to after you have made some changes in your site which you want to deploy.'),
+    );
+  }
+
+
+
+  if ($latest_snapshot) {
+    $form['actions'] = array(
+      '#type' => 'actions'
+    );
+    $form['actions']['submit'] = array(
+      '#type' => 'submit',
+      '#value' => t('Download deploy file'),
+      '#submit' => array('config_deploy_export_submit'),
+      '#disabled' => !$diff,
+    );
+  } else {
+    $form['actions'] = array(
+      '#type' => 'actions'
+    );
+    $form['actions']['submit'] = array(
+      '#type' => 'submit',
+      '#value' => t('Create snapshot'),
+
+    );
+  }
+
+  return $form;
+}
+
+
+
+/**
+ * Submit handler for config_deploy_form().
+ */
+function config_deploy_form_submit(array &$form, array &$form_state) {
+  // create snaphsot if there is not already one.
+  config_deploy_create_snapshot();
+  return $form;
+}
+
+/**
+ * Creates a new snapshot config directory
+ */
+function config_deploy_create_snapshot() {
+  // Define the source directory.
+  $source_directory = config_get_config_directory('active');
+
+  // Get the private file system path.
+  $private_path = file_default_scheme() === 'private' ? 'private://' : config_get('system.core', 'file_private_path');
+
+  if (empty($private_path)) {
+    backdrop_set_message(t('The private file system is not configured. Please configure it before proceeding.'), 'error');
+    return;
+  }
+
+  // Create a timestamped directory name.
+  $timestamp = date('Y-m-d_H-i-s');
+  $target_directory = $private_path . '/config_snapshot_' . $timestamp;
+
+  try {
+    // Ensure the target directory exists.
+    if (!file_prepare_directory($target_directory, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS)) {
+      throw new Exception('Failed to prepare the target directory.');
+    }
+
+    // Open the source directory.
+    $files = file_scan_directory($source_directory, '/.*/', array('key' => 'filename'));
+
+    // Loop through each file and copy it to the target directory.
+    foreach ($files as $file) {
+      $source_path = $file->uri;
+      $destination_path = $target_directory . '/' . $file->filename;
+
+      if (!file_unmanaged_copy($source_path, $destination_path, FILE_EXISTS_REPLACE)) {
+        throw new Exception("Failed to copy $source_path to $destination_path.");
+      }
+    }
+
+    // Display a success message.
+    backdrop_set_message(t('The active configuration directory has been successfully duplicated to %directory.', array('%directory' => $target_directory)));
+    return TRUE;
+  } catch (Exception $e) {
+    // Handle errors gracefully.
+    watchdog('mymodule', $e->getMessage(), array(), WATCHDOG_ERROR);
+    backdrop_set_message(t('An error occurred while duplicating the configuration directory: %message', array('%message' => $e->getMessage())), 'error');
+    return FALSE;
+  }
+}
+
+/**
+ * Check for existing configuration snapshot directories.
+ *
+ * @return string|bool
+ *   The timestamp of the most recent snapshot in 'Y-m-d_H-i-s' format if found,
+ *   or FALSE if no snapshots are present.
+ */
+function config_deploy_get_latest_snapshot() {
+  // Get the private file system path.
+  $private_path = file_default_scheme() === 'private' ? 'private://' : config_get('system.core', 'file_private_path');
+
+  if (empty($private_path)) {
+    backdrop_set_message(t('The private file system is not configured. Please configure it before proceeding.'), 'error');
+    return FALSE;
+  }
+
+  // Pattern for config snapshot directories.
+  $snapshot_pattern = '/^config_snapshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/';
+
+  // Scan the private directory.
+  $directories = file_scan_directory($private_path, '/.*/', array('recurse' => FALSE));
+
+  // Filter for directories matching the snapshot pattern.
+  $snapshots = array();
+  foreach ($directories as $directory) {
+    if (preg_match($snapshot_pattern, $directory->filename)) {
+      $snapshots[$directory->filename] = $directory->uri;
+    }
+  }
+
+  if (empty($snapshots)) {
+    // No snapshots found.
+    return FALSE;
+  }
+
+  // Sort snapshots by filename (timestamps in their names).
+  krsort($snapshots);
+
+  // Return the latest snapshot timestamp (from the directory name).
+  $latest_snapshot = key($snapshots);
+  return str_replace('config_snapshot_', '', $latest_snapshot);
+}
+
+/**
+ * Check for differences between the active configuration directory and a snapshot.
+ *
+ * @param string $snapshot_directory
+ *   The URI of the snapshot directory to compare against.
+ *
+ * @return array
+ *   An associative array of differences:
+ *     - 'added': List of configuration files added in the active directory.
+ *     - 'removed': List of configuration files removed from the active directory.
+ *     - 'changed': List of configuration files that have changed.
+ */
+function config_deploy_compare_directories($snapshot_directory) {
+  // Get the active configuration directory.
+  $active_directory = config_get_config_directory('active');
+
+  // Initialize result arrays.
+  $added = [];
+  $removed = [];
+  $changed = [];
+
+  // Scan the active and snapshot directories.
+  $active_files = file_scan_directory($active_directory, '/.*/', array('key' => 'filename'));
+  $snapshot_files = file_scan_directory($snapshot_directory, '/.*/', array('key' => 'filename'));
+
+  // Convert scanned files to arrays of file contents indexed by filename.
+  $active_configs = array_map(function ($file) {
+    return file_get_contents($file->uri);
+  }, $active_files);
+
+  $snapshot_configs = array_map(function ($file) {
+    return file_get_contents($file->uri);
+  }, $snapshot_files);
+
+  // Compare files.
+  foreach ($active_configs as $filename => $active_content) {
+    if (!isset($snapshot_configs[$filename])) {
+      $added[] = $filename;
+    } elseif ($active_content !== $snapshot_configs[$filename]) {
+      $changed[] = $filename;
+    }
+  }
+
+  foreach ($snapshot_configs as $filename => $snapshot_content) {
+    if (!isset($active_configs[$filename])) {
+      $removed[] = $filename;
+    }
+  }
+
+  // Return the differences.
+  return [
+    'added' => $added,
+    'removed' => $removed,
+    'changed' => $changed,
+  ];
+}
+
+/**
+ * Create a partial deploy.tar.gz file with new and changed configuration files.
+ *
+ * @param string $snapshot_directory
+ *   The URI of the snapshot directory to compare against.
+ * @return string|bool
+ *   The URI of the generated deploy.tar.gz file if successful, or FALSE on failure.
+ */
+/**
+ * Create a partial deploy.tar.gz file with new and changed configuration files.
+ *
+ * @param string $snapshot_directory
+ *   The URI of the snapshot directory to compare against.
+ * @return string|bool
+ *   The URI of the generated deploy.tar.gz file if successful, or FALSE on failure.
+ */
+function config_deploy_create_partial_config_archive($snapshot_directory) {
+  // Define the active configuration directory.
+  $active_directory = config_get_config_directory('active');
+
+  // Compare the directories to get the differences.
+  $differences = config_deploy_compare_directories($snapshot_directory);
+
+  // Include files that are new or changed in the active directory.
+  $files_to_include = array_merge($differences['added'], $differences['changed']);
+
+  if (empty($files_to_include)) {
+    backdrop_set_message(t('No new or changed configuration files to archive.'), 'status');
+    return FALSE;
+  }
+
+  // Prepare a temporary file path for the archive.
+  $temp_directory = file_directory_temp();
+  $archive_path = file_create_filename('deploy.tar.gz', $temp_directory);
+
+  try {
+    // Create a temporary storage for the partial export.
+    $partial_storage_path = file_create_filename('partial_config', $temp_directory);
+    if (!file_prepare_directory($partial_storage_path, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS)) {
+      throw new Exception('Failed to prepare the partial config storage directory.');
+    }
+
+    // Copy the files from the active directory to the partial storage directory.
+    foreach ($files_to_include as $filename) {
+      $source_path = $active_directory . '/' . $filename;
+      $destination_path = $partial_storage_path . '/' . $filename;
+
+      // Ensure the destination directory exists.
+      $destination_dir = dirname($destination_path);
+      if (!file_prepare_directory($destination_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS)) {
+        throw new Exception(t('Failed to create directory for @file.', ['@file' => $destination_path]));
+      }
+
+      // Copy the file from active storage to partial storage.
+      if (!file_unmanaged_copy($source_path, $destination_path, FILE_EXISTS_REPLACE)) {
+        throw new Exception(t('Failed to copy file @file.', ['@file' => $source_path]));
+      }
+    }
+
+    // Use Backdrop's ConfigFileStorage to create the tar.gz archive.
+    $partial_storage = new ConfigFileStorage($partial_storage_path);
+    $partial_storage->exportArchive($archive_path);
+
+    // Clean up the partial storage directory.
+    file_unmanaged_delete_recursive($partial_storage_path);
+
+    backdrop_set_message(t('Configuration archive created successfully.'));
+    return $archive_path;
+  } catch (Exception $e) {
+    watchdog('config_deploy', $e->getMessage(), [], WATCHDOG_ERROR);
+    backdrop_set_message(t('An error occurred while creating the configuration archive: @message', ['@message' => $e->getMessage()]), 'error');
+    return FALSE;
+  }
+}
+
+/**
+ * Callback function
+ *
+ * @return void
+ */
+function config_deploy_diff_export() {
+  $latest_snapshot = config_deploy_get_latest_snapshot();
+  $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
+  $file_path = config_deploy_create_partial_config_archive($snapshot_directory);
+  $filename = str_replace(file_directory_temp() . '/', '', $file_path);
+  $headers = array(
+    'Content-Disposition' => 'attachment; filename=deploy.tar.gz',
+    'Content-type' => 'application/x-gzip',
+  );
+  file_transfer('temporary://' . $filename, $headers);
+  file_unmanaged_delete($file_path);
+}
+
+/**
+ * Submit handler for config_export_full_form().
+ */
+function config_deploy_export_submit(array $form, array &$form_state) {
+  $form_state['redirect'] = 'admin/config/development/configuration/deploy/export';
+}
+
+/**
+ * Delete latest snapshot directory and its contents.
+ *
+ * @return bool
+ *   TRUE if the directory was successfully deleted, FALSE otherwise.
+ */
+function _config_deploy_snapshot_delete() {
+  $latest_snapshot = config_deploy_get_latest_snapshot();
+  $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
+  if (!file_exists($snapshot_directory)) {
+    backdrop_set_message(t('The snapshot directory @dir does not exist.', ['@dir' => $snapshot_directory]), 'error');
+    return FALSE;
+  }
+
+  try {
+    // Use file_unmanaged_delete_recursive to delete the directory and its contents.
+    if (file_unmanaged_delete_recursive($snapshot_directory)) {
+      backdrop_set_message(t('The snapshot directory @dir has been successfully deleted.', ['@dir' => $snapshot_directory]));
+      return TRUE;
+    } else {
+      throw new Exception(t('Failed to delete the snapshot directory @dir.', ['@dir' => $snapshot_directory]));
+    }
+  } catch (Exception $e) {
+    // Log and display the error.
+    watchdog('config_deploy', $e->getMessage(), [], WATCHDOG_ERROR);
+    backdrop_set_message(t('An error occurred while deleting the snapshot directory: @message', ['@message' => $e->getMessage()]), 'error');
+    return FALSE;
+  }
+}
+
+/**
+ * Page callback: Form constructor for snapshot deletion confirmation for
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return void
+ */
+function config_deploy_snapshot_delete_confirm($form, &$form_state) {
+
+  return confirm_form(
+    $form,
+    t('Are you sure you want to delete latest sanpshot?'),
+    'admin/config/development/configuration/deploy',
+    t('This action cannot be undone.'),
+    t('Delete'),
+    t('Cancel')
+  );
+}
+
+/**
+ * Form submission handler for config_deploy_snapshot_delete_confirm().
+ *
+ */
+function config_deploy_snapshot_delete_confirm_submit($form, &$form_state) {
+  _config_deploy_snapshot_delete();
+  backdrop_goto('admin/config/development/configuration/deploy/');
+}
+
+/**
+ * Shows diff of specified configuration file.
+ *
+ * @param string $config_file
+ *   The name of the configuration file.
+ *
+ * @return string
+ *   Table showing a two-way diff between the active and staged configuration.
+ */
+function config_deploy_diff_page($config_file) {
+  $diff = config_deploy_diff($config_file);
+
+  $build = array();
+
+  $build['#title'] = t('View changes of @config_file', array('@config_file' => $config_file));
+  // Add the CSS for the inline diff.
+  $build['#attached']['css'][] = backdrop_get_path('module', 'system') . '/css/system.diff.css';
+
+  $build['diff'] = array(
+    '#theme' => 'table',
+    '#header' => array(
+      array('data' => t('Old'), 'colspan' => '2', 'class' => array('config-old')),
+      array('data' => t('New'), 'colspan' => '2', 'class' => array('config-new')),
+    ),
+    '#attributes' => array('class' => array('diff-table')),
+    '#rows' => $diff,
+    '#sticky' => FALSE,
+  );
+
+  $build['actions'] = array(
+    '#type' => 'actions',
+    '#attributes' => array('class' => array('form-actions')),
+  );
+  $build['actions']['back'] = array(
+    '#type' => 'link',
+    '#title' => t('Back to "Synchronize configuration" page.'),
+    '#href' => 'admin/config/development/configuration/deploy',
+    '#attributes' => array('class' => array('button', 'button-secondary', 'form-submit')),
+  );
+
+  if (backdrop_is_dialog()) {
+    $build['actions']['back']['#attributes']['class'][] = 'dialog-cancel';
+    $build['actions']['back']['#title'] = t('Close');
+  }
+
+  return $build;
+}
+
+/**
+ * Return a formatted diff of a named config between staging and active.
+ *
+ * @param string $name
+ *   The name of the configuration object to diff.
+ *
+ * @return array
+ *   An array of formatted strings showing the diffs between the two storages.
+ *
+ * @see config_diff_page()
+ */
+function config_deploy_diff($name) {
+  $latest_snapshot = config_deploy_get_latest_snapshot();
+  $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
+  $file_name = $snapshot_directory . '/' . $name;
+
+  // Remove the `.json` extension for reading from active storage.
+  $name = str_replace('.json', '', $name);
+  $active_storage = config_get_config_storage('active');
+
+  // Read the active configuration file.
+  $source_data = $active_storage->read($name);
+
+  // Read the snapshot file and decode its JSON content.
+  $target_data_raw = file_get_contents($file_name);
+  $target_data = $target_data_raw !== FALSE ? json_decode($target_data_raw, TRUE) : NULL;
+
+  // Normalize the data by encoding both as JSON strings split into lines.
+  $source_data = explode("\n", backdrop_json_encode($source_data, TRUE));
+  $target_data = $target_data !== NULL ? explode("\n", backdrop_json_encode($target_data, TRUE)) : array(t('File removed'));
+
+  // Check for new or removed files.
+  if ($source_data === array('false')) {
+    // File added.
+    $source_data = array(t('File added'));
+  }
+  if ($target_data === array('false')) {
+    // File removed.
+    $target_data = array(t('File removed'));
+  }
+
+  // Generate the diff.
+  $diff = new Diff($target_data, $source_data);
+  $formatter = new BackdropDiffFormatter();
+  return $formatter->format($diff);
+}
