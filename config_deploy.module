@@ -51,12 +51,23 @@ function config_deploy_menu() {
 }
 
 function config_deploy_form_config_sync_form_alter(&$form, &$form_state, $form_id) {
+
   $form_state['config_statuses'] = config_get_statuses();
   $changed_config_count = count(array_filter($form_state['config_statuses']));
   if ($changed_config_count != 0) {
+    $form['delete_fieldset'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Deleted configs files'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $form['delete_fieldset']['delete'] = $form['delete'];
+    unset($form['delete']);
     $form['delete_missing_fieldset'] = array(
       '#type' => 'fieldset',
       '#title' => t('Override default functionallity'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
     );
     $form['delete_missing_fieldset']['delete_missing'] = array(
       '#type' => 'checkbox',
