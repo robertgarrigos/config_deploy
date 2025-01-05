@@ -94,7 +94,7 @@ Current Maintainers
 Credits
 -------
 
-- Originally written for Bckdrop by [Robert Garrigós](https://github.com/robertgarrigos).
+- Originally written for Backdrop by [Robert Garrigós](https://github.com/robertgarrigos).
 
 License
 -------
