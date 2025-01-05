@@ -1,6 +1,6 @@
 type = module
 name = Config Deploy
-description = Allows deploying of config files to stagins or production sites.
+description = Allows deploying of config files to staging or production sites.
 package = Development
 configure = admin/config/development/configuration/deploy
 dependencies[] = config
