@@ -54,9 +54,9 @@ Manager, in a single step.
 
 How to accomplish this?
 
-1. Go to the configuration of this module on admin/config/development/configurat
-ion/deploy.
-1. Create a new snapshot. This will create a copy of the current active config
+1. Go to the configuration of this module on
+admin/config/development/configuration/deploy.
+2. Create a new snapshot. This will create a copy of the current active config
 directory within the private path (which needs to be set).
 1. Start creating your new feature. At any time, you can go to the admin page of
 this module to see what the new and modified config files are. This is done by
