@@ -2,9 +2,10 @@ Config Deploy
 ======================
 
 Config Deploy enables you to deploy partial configuration of a site through the
-Backdrop GUI in a single upload file. This module is aimed at web builders who
-don't want to use git to synchronize the config files of their local site with
-staging or production.
+Backdrop GUI in a single upload file.
+
+This module is aimed at web builders who don't want to use git to synchronize
+the config files of their local site with staging or production.
 
 ATTENTION: this module can potentially break your site. Make sure to read the
 documentation down here.
