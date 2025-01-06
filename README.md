@@ -20,8 +20,10 @@ Installation
 - Install this module using the official Backdrop CMS instructions at
   https://docs.backdropcms.org/documentation/extend-with-modules.
 - Visit the configuration page under Administration > Configuration >
-- Development > Configuration >  Deploy (admin/config/development/configuration/
-- deploy) and create a new snapshot of the active config dir.
+- Development > Configuration >  Deploy
+(admin/config/development/configuration/deploy) and create a new snapshot of
+the active config dir.
+- Install this module in the staging and production sites also!
 
 Documentation
 -------------
@@ -64,9 +66,10 @@ comparing the actual state of the active config directory with the created
 snapshot config directory.
 1. Whenever you are ready to deploy, click on 'Download deploy file' in the
 admin page of this module.
-1. Go to the staging site and upload the downloaded deploy.tar.gz file with the
-Full Import form of the Configuration Manager (admin/config/development/configur
-ation/full)
+1. Go to the staging/production site and upload the downloaded deploy.tar.gz file
+with the Full Import form of the Configuration Manager
+(admin/config/development/configuration/full). Remember that you have to have
+installed Config Deploy also in the staging/production sites.
 1. Backdrop will show you the synch page with a list of missing files and all
 the new and modified files. You can ignore the missing files BUT remember to
 leave unchecked (by default) the new checkbox you will find at the bottom of the
