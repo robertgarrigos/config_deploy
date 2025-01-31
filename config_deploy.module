@@ -51,31 +51,36 @@ function config_deploy_menu() {
 }
 
 function config_deploy_form_config_sync_form_alter(&$form, &$form_state, $form_id) {
-
   $form_state['config_statuses'] = config_get_statuses();
   $changed_config_count = count(array_filter($form_state['config_statuses']));
+
   if ($changed_config_count != 0) {
-    $form['delete_fieldset'] = array(
+    $form['delete_fieldset'] = [
       '#type' => 'fieldset',
       '#title' => t('Deleted configs files'),
       '#collapsible' => TRUE,
       '#collapsed' => TRUE,
-    );
-    $form['delete_fieldset']['delete'] = $form['delete'];
-    unset($form['delete']);
-    $form['delete_missing_fieldset'] = array(
+    ];
+
+    // Only move 'delete' field if it exists
+    if (isset($form['delete'])) {
+      $form['delete_fieldset']['delete'] = $form['delete'];
+      unset($form['delete']);
+    }
+
+    $form['delete_missing_fieldset'] = [
       '#type' => 'fieldset',
-      '#title' => t('Override default functionallity'),
+      '#title' => t('Override default functionality'),
       '#collapsible' => TRUE,
       '#collapsed' => TRUE,
-    );
-    $form['delete_missing_fieldset']['delete_missing'] = array(
+    ];
+    $form['delete_missing_fieldset']['delete_missing'] = [
       '#type' => 'checkbox',
       '#title' => t('Delete missing config files'),
       '#description' => t('Select this checkbox if missing config files should be deleted (core\'s default). Unchecking this will apply only new or changed configurations but it will ignore any removed configurations.'),
       '#default_value' => 0,
-    );
-    $form['actions']['submit']['#submit'] = array('config_deploy_sync_submit');
+    ];
+    $form['actions']['submit']['#submit'] = ['config_deploy_sync_submit'];
   }
 }
 
@@ -239,15 +244,15 @@ function config_deploy_form_submit(array &$form, array &$form_state) {
  * Creates a new snapshot config directory
  */
 function config_deploy_create_snapshot() {
-  // Define the source directory.
-  $source_directory = config_get_config_directory('active');
+  // Get the active configuration storage.
+  $active_storage = config_get_config_storage('active');
 
   // Get the private file system path.
   $private_path = file_default_scheme() === 'private' ? 'private://' : config_get('system.core', 'file_private_path');
 
   if (empty($private_path)) {
     backdrop_set_message(t('The private file system is not configured. Please configure it before proceeding.'), 'error');
-    return;
+    return FALSE;
   }
 
   // Create a timestamped directory name.
@@ -260,26 +265,32 @@ function config_deploy_create_snapshot() {
       throw new Exception('Failed to prepare the target directory.');
     }
 
-    // Open the source directory.
-    $files = file_scan_directory($source_directory, '/.*/', array('key' => 'filename'));
+    // Retrieve all configuration names from active storage.
+    $all_config_names = $active_storage->listAll();
 
-    // Loop through each file and copy it to the target directory.
-    foreach ($files as $file) {
-      $source_path = $file->uri;
-      $destination_path = $target_directory . '/' . $file->filename;
+    // Loop through each configuration item and save it as a JSON file.
+    foreach ($all_config_names as $config_name) {
+      $config_data = $active_storage->read($config_name);
 
-      if (!file_unmanaged_copy($source_path, $destination_path, FILE_EXISTS_REPLACE)) {
-        throw new Exception("Failed to copy $source_path to $destination_path.");
+      if ($config_data === FALSE) {
+        watchdog('config_deploy', "Failed to read configuration: $config_name", [], WATCHDOG_WARNING);
+        continue;
+      }
+
+      // Convert the config data to JSON and write to a file.
+      $destination_path = $target_directory . '/' . $config_name . '.json';
+      if (file_put_contents($destination_path, backdrop_json_encode($config_data, TRUE)) === FALSE) {
+        throw new Exception("Failed to save configuration snapshot: $config_name");
       }
     }
 
     // Display a success message.
-    backdrop_set_message(t('The active configuration directory has been successfully duplicated to %directory.', array('%directory' => $target_directory)));
+    backdrop_set_message(t('The active configuration has been successfully saved as a snapshot in %directory.', ['%directory' => $target_directory]));
     return TRUE;
   } catch (Exception $e) {
     // Handle errors gracefully.
-    watchdog('mymodule', $e->getMessage(), array(), WATCHDOG_ERROR);
-    backdrop_set_message(t('An error occurred while duplicating the configuration directory: %message', array('%message' => $e->getMessage())), 'error');
+    watchdog('config_deploy', $e->getMessage(), [], WATCHDOG_ERROR);
+    backdrop_set_message(t('An error occurred while creating the configuration snapshot: %message', ['%message' => $e->getMessage()]), 'error');
     return FALSE;
   }
 }
@@ -340,39 +351,44 @@ function config_deploy_get_latest_snapshot() {
  *     - 'changed': List of configuration files that have changed.
  */
 function config_deploy_compare_directories($snapshot_directory) {
-  // Get the active configuration directory.
-  $active_directory = config_get_config_directory('active');
+  // Get the active configuration storage.
+  $active_storage = config_get_config_storage('active');
 
   // Initialize result arrays.
   $added = [];
   $removed = [];
   $changed = [];
 
-  // Scan the active and snapshot directories.
-  $active_files = file_scan_directory($active_directory, '/.*/', array('key' => 'filename'));
-  $snapshot_files = file_scan_directory($snapshot_directory, '/.*/', array('key' => 'filename'));
+  // Retrieve all active configuration names.
+  $active_config_names = $active_storage->listAll();
 
-  // Convert scanned files to arrays of file contents indexed by filename.
-  $active_configs = array_map(function ($file) {
-    return file_get_contents($file->uri);
-  }, $active_files);
+  // Read active config values.
+  $active_configs = [];
+  foreach ($active_config_names as $config_name) {
+    $active_configs[$config_name] = backdrop_json_encode($active_storage->read($config_name), TRUE);
+  }
 
-  $snapshot_configs = array_map(function ($file) {
-    return file_get_contents($file->uri);
-  }, $snapshot_files);
+  // Read snapshot config values.
+  $snapshot_configs = [];
+  $snapshot_files = file_scan_directory($snapshot_directory, '/.*/', ['key' => 'filename']);
 
-  // Compare files.
-  foreach ($active_configs as $filename => $active_content) {
-    if (!isset($snapshot_configs[$filename])) {
-      $added[] = $filename;
-    } elseif ($active_content !== $snapshot_configs[$filename]) {
-      $changed[] = $filename;
+  foreach ($snapshot_files as $file) {
+    $config_name = str_replace('.json', '', $file->filename);
+    $snapshot_configs[$config_name] = file_get_contents($file->uri);
+  }
+
+  // Compare configuration.
+  foreach ($active_configs as $config_name => $active_content) {
+    if (!isset($snapshot_configs[$config_name])) {
+      $added[] = $config_name;
+    } elseif ($active_content !== $snapshot_configs[$config_name]) {
+      $changed[] = $config_name;
     }
   }
 
-  foreach ($snapshot_configs as $filename => $snapshot_content) {
-    if (!isset($active_configs[$filename])) {
-      $removed[] = $filename;
+  foreach ($snapshot_configs as $config_name => $snapshot_content) {
+    if (!isset($active_configs[$config_name])) {
+      $removed[] = $config_name;
     }
   }
 
@@ -401,8 +417,8 @@ function config_deploy_compare_directories($snapshot_directory) {
  *   The URI of the generated deploy.tar.gz file if successful, or FALSE on failure.
  */
 function config_deploy_create_partial_config_archive($snapshot_directory) {
-  // Define the active configuration directory.
-  $active_directory = config_get_config_directory('active');
+  // Get the active configuration storage.
+  $active_storage = config_get_config_storage('active');
 
   // Compare the directories to get the differences.
   $differences = config_deploy_compare_directories($snapshot_directory);
@@ -417,37 +433,44 @@ function config_deploy_create_partial_config_archive($snapshot_directory) {
 
   // Prepare a temporary file path for the archive.
   $temp_directory = file_directory_temp();
-  $archive_path = file_create_filename('deploy.tar.gz', $temp_directory);
+  $partial_storage_path = file_create_filename('partial_config', $temp_directory);
+  $archive_path = $temp_directory . '/deploy.tar.gz';
 
   try {
-    // Create a temporary storage for the partial export.
-    $partial_storage_path = file_create_filename('partial_config', $temp_directory);
+    // Ensure the temp directory exists.
     if (!file_prepare_directory($partial_storage_path, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS)) {
       throw new Exception('Failed to prepare the partial config storage directory.');
     }
 
-    // Copy the files from the active directory to the partial storage directory.
-    foreach ($files_to_include as $filename) {
-      $source_path = $active_directory . '/' . $filename;
-      $destination_path = $partial_storage_path . '/' . $filename;
+    // Retrieve config data and save to the temporary directory.
+    foreach ($files_to_include as $config_name) {
+      $config_data = $active_storage->read($config_name);
 
-      // Ensure the destination directory exists.
-      $destination_dir = dirname($destination_path);
-      if (!file_prepare_directory($destination_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS)) {
-        throw new Exception(t('Failed to create directory for @file.', ['@file' => $destination_path]));
+      if ($config_data === FALSE) {
+        watchdog('config_deploy', "Failed to read configuration: $config_name", [], WATCHDOG_WARNING);
+        continue;
       }
 
-      // Copy the file from active storage to partial storage.
-      if (!file_unmanaged_copy($source_path, $destination_path, FILE_EXISTS_REPLACE)) {
-        throw new Exception(t('Failed to copy file @file.', ['@file' => $source_path]));
+      $destination_path = $partial_storage_path . '/' . $config_name . '.json';
+
+      // Save the config data as a JSON file.
+      if (file_put_contents($destination_path, backdrop_json_encode($config_data, TRUE)) === FALSE) {
+        throw new Exception(t('Failed to save configuration file @file.', ['@file' => $destination_path]));
       }
     }
 
-    // Use Backdrop's ConfigFileStorage to create the tar.gz archive.
-    $partial_storage = new ConfigFileStorage($partial_storage_path);
-    $partial_storage->exportArchive($archive_path);
+    // Debugging: Ensure files are saved
+    watchdog('config_deploy', 'Files saved: ' . print_r(scandir($partial_storage_path), TRUE), [], WATCHDOG_DEBUG);
 
-    // Clean up the partial storage directory.
+    // Create the archive using system tar command instead of PharData.
+    $tar_command = sprintf('tar -czf %s -C %s .', escapeshellarg($archive_path), escapeshellarg($partial_storage_path));
+    $output = shell_exec($tar_command);
+
+    // Debugging: Check if the archive exists and has content
+    watchdog('config_deploy', "Archive created: $archive_path", [], WATCHDOG_DEBUG);
+    watchdog('config_deploy', "Archive size: " . filesize($archive_path), [], WATCHDOG_DEBUG);
+
+    // Clean up the temporary storage directory.
     file_unmanaged_delete_recursive($partial_storage_path);
 
     backdrop_set_message(t('Configuration archive created successfully.'));
@@ -603,32 +626,44 @@ function config_deploy_diff_page($config_file) {
  */
 function config_deploy_diff($name) {
   $latest_snapshot = config_deploy_get_latest_snapshot();
-  $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
-  $file_name = $snapshot_directory . '/' . $name;
+  if (!$latest_snapshot) {
+    return [[t('Error: No snapshot found.')]];
+  }
 
-  // Remove the `.json` extension for reading from active storage.
-  $name = str_replace('.json', '', $name);
+  $snapshot_directory = 'private://config_snapshot_' . $latest_snapshot;
+  $file_name = $snapshot_directory . '/' . $name . '.json'; // Ensure JSON extension
+
+  // Ensure the snapshot file exists before reading.
+  if (!file_exists($file_name)) {
+    watchdog('config_deploy', "Configuration file $file_name does not exist.", [], WATCHDOG_WARNING);
+    return [[t('Error: Snapshot file not found.')]];
+  }
+
+  // Ensure proper config name formatting.
+  $config_name = str_replace('.json', '', $name);
   $active_storage = config_get_config_storage('active');
 
   // Read the active configuration file.
-  $source_data = $active_storage->read($name);
-
-  // Read the snapshot file and decode its JSON content.
-  $target_data_raw = file_get_contents($file_name);
-  $target_data = $target_data_raw !== FALSE ? json_decode($target_data_raw, TRUE) : NULL;
-
-  // Normalize the data by encoding both as JSON strings split into lines.
-  $source_data = explode("\n", backdrop_json_encode($source_data, TRUE));
-  $target_data = $target_data !== NULL ? explode("\n", backdrop_json_encode($target_data, TRUE)) : array(t('File removed'));
-
-  // Check for new or removed files.
-  if ($source_data === array('false')) {
-    // File added.
-    $source_data = array(t('File added'));
+  $source_data = $active_storage->read($config_name);
+  if ($source_data === FALSE) {
+    watchdog('config_deploy', "Active configuration $config_name not found.", [], WATCHDOG_WARNING);
+    $source_data = array(t('File missing from active storage'));
   }
-  if ($target_data === array('false')) {
-    // File removed.
-    $target_data = array(t('File removed'));
+
+  // Read and decode the snapshot file.
+  $target_data_raw = file_get_contents($file_name);
+  $target_data = json_decode($target_data_raw, TRUE);
+
+  // Normalize data for comparison.
+  $source_data = explode("\n", backdrop_json_encode($source_data, TRUE));
+  $target_data = $target_data !== NULL ? explode("\n", backdrop_json_encode($target_data, TRUE)) : [t('File removed')];
+
+  // Handle new or removed files.
+  if ($source_data === ['false']) {
+    $source_data = [t('File added')];
+  }
+  if ($target_data === ['false']) {
+    $target_data = [t('File removed')];
   }
 
   // Generate the diff.
